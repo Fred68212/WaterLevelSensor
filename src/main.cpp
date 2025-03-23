@@ -12,15 +12,20 @@
 #include <sys/unistd.h>
 #include <esp_sleep.h>
 #include <secrets.h>
+#include <esp_now.h>
+
+// unsigned long long uS_TO_S_FACTOR = 1000000;  // Conversion factor for microseconds to seconds
+// unsigned long long TIME_TO_SLEEP = 5 * 60; // Time ESP32 will go to sleep (in minutes)
 
 // Identify the unit
 //const String unitID = "Basement_Sink";
+const char* hostName = "watersensor";
 
 // Static IP configuration
 IPAddress staticIP(192, 168, 1, 40); // ESP32 static IP
 IPAddress gateway(192, 168, 1, 1);    // IP Address of your network gateway (router)
 IPAddress subnet(255, 255, 255, 0);   // Subnet mask
-IPAddress primaryDNS(192, 168, 1, 1); // Primary DNS (optional)
+IPAddress primaryDNS(192, 168, 1, 11); // Primary DNS (optional)
 IPAddress secondaryDNS(0, 0, 0, 0);   // Secondary DNS (optional)
 
 
@@ -61,20 +66,35 @@ int ledPin = 2;
 // Server information
 const String dbServer PROGMEM = "http://192.168.1.11/iot.php?inches=";
 const String statusServer PROGMEM = "http://192.168.1.11/status.php?unitID=Basement_Sink&unitStatus=";
-const String monitorServer PROGMEM = "http://192.168.1.41/?data=";
 
 String systemStatus = "ok";
 // Alarm variables
 volatile int lastAlarm = 0;
 
-//Misc
-
-// DateTime futureTime;
-
 RTC_DS3231 rtc; // Initialize an instance of the RTC_DS3231 class
 
 // the pin that is connected to SQW
 #define CLOCK_INTERRUPT_PIN 4
+
+// REPLACE WITH YOUR RECEIVER MAC Address
+uint8_t broadcastAddress[] = {0xCC, 0xDB, 0xA7, 0x95, 0xB3, 0x38};
+
+// Structure example to send data
+// Must match the receiver structure
+typedef struct struct_message {
+  int b;
+} struct_message;
+
+// Create a struct_message called myData
+struct_message myData;
+
+esp_now_peer_info_t peerInfo;
+
+// callback when data is sent
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("\r\nLast Packet Send Status:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
 
 // Function to be called when the alarm goes off
 void onAlarm() {
@@ -125,56 +145,33 @@ void showTime() {
 
 }
 
-/*
-void printAlarm() {
-  // Is alarm set and for when
-  DateTime alarm = rtc.getAlarm1();
-  Serial.print("Alarm set for: ");
-  printTwoDigits(alarm.hour());
-  Serial.print(":");
-  printTwoDigits(alarm.minute());
-  Serial.println();
-}
-*/
+
 
 void dbInsert(const char* urlString) {
-  
-  int retryDelayMs = 2000;
-  const int maxRetries = 5;
-  int retries = 0;
   HTTPClient http;
-
-  while (retries < maxRetries) {
-      http.begin(urlString);
-      int httpCode = http.GET();
-
-      if (httpCode == HTTP_CODE_OK) {
-          // Success!
-          Serial.println(httpCode);
-          http.end();
-          Serial.flush(); 
-          return; // Exit the function
-      } else if (httpCode > 0){
-        Serial.printf("[HTTP] GET... failed, HTTP error code: %d, error: %s\n", httpCode, http.errorToString(httpCode).c_str());
-      } else {
-        Serial.printf("[HTTP] GET... connection failed or timed out, error code: %d\n", httpCode);
-      }
-      http.end(); 
-
-      retries++;
-      if (retries < maxRetries) {
-          Serial.printf("Retrying in %d ms...\n", retryDelayMs);
-          delay(retryDelayMs);
-      }
+  http.begin(urlString);
+  int httpCode = http.GET();
+  if (httpCode > 0) { //Check for the returning code
+    if (httpCode == HTTP_CODE_OK) { 
+      // get payload with http.getString();
+      Serial.println(httpCode);
+      // Serial.println(payload);
+    } else {
+      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+  } else {
+    Serial.println(F("Error on HTTP request"));
   }
-
+  Serial.flush();
+  http.end();
 }
+
 
 // Get Sensor Readings and return JSON object
 String getSensorReadings() {
   showTime();
   Serial.println();
-  Serial.println(lastAlarm);
+//  Serial.println(lastAlarm);
     // Clears the trigPin
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
@@ -206,35 +203,43 @@ String getSensorReadings() {
     dbInsert(urlString.c_str());
   }
 
-  String urlString = monitorServer + String(distanceInch);
-  Serial.println(urlString);
-  dbInsert(urlString.c_str());
-
   showTime();
 
   // Prints the distance in the Serial Monitor
   Serial.println();
-  Serial.print("Distance (cm): ");
+  Serial.print(F("Distance (cm): "));
   Serial.println(distanceCm);
-  Serial.print("Distance (inch): ");
+  Serial.print(F("Distance (inch): "));
   Serial.println(distanceInch);
   Serial.println();
-  Serial.print(getCpuFrequencyMhz());
-  Serial.println(" Mhz");
   /*
   readings["distanceInch"] = String(distanceInch);
   String jsonString = JSON.stringify(readings);
   return jsonString;
   */
+   // Set values to send
+
+   myData.b = distanceInch;
+   
+   // Send message via ESP-NOW
+   esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
+    
+   if (result == ESP_OK) {
+     Serial.println("Sent with success");
+   }
+   else {
+     Serial.println("Error sending the data");
+   }
+   delay(2000);
   return jsonString;  
 }
 
 // Initialize LittleFS
 void initLittleFS() {
   if (!LittleFS.begin(true)) {
-    Serial.println("An error has occurred while mounting LittleFS");
+    Serial.println(F("An error has occurred while mounting LittleFS"));
   }
-  Serial.println("LittleFS mounted successfully");
+  Serial.println(F("LittleFS mounted successfully"));
 }
 
 // Initialize WiFi
@@ -248,15 +253,18 @@ void initWiFi() {
   }
     // Configuring static IP
   if(!WiFi.config(staticIP, gateway, subnet, primaryDNS, secondaryDNS)) {
-      Serial.println("Failed to configure Static IP");
+      Serial.println(F("Failed to configure Static IP"));
   } else {
-      Serial.println("Static IP configured!");
+      Serial.println(F("Static IP configured!"));
+      WiFi.setHostname(hostName);
   }
     
-  Serial.print("ESP32 IP Address: ");
+  Serial.print(F("ESP32 IP Address: "));
   Serial.println(WiFi.localIP());  // Print the ESP32 IP address to Serial Monitor
    
   Serial.println(WiFi.localIP());
+  Serial.print(F("Hostname: "));
+  Serial.println(WiFi.getHostname());
 }
 
 void dbInsert(const char* urlString);
@@ -298,13 +306,13 @@ void initWebSocket() {
 }
 
 void setup() {
-  setCpuFrequencyMhz(80);
-  Serial.setDebugOutput(true);
   Serial.begin(115200);
   Wire.begin();
   initWiFi();
   initLittleFS();
   initWebSocket();
+  Serial.println("CPU Frequency: " + String(getCpuFrequencyMhz()));
+
 // HC-SR04
   pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output
   pinMode(echoPin, INPUT); // Sets the echoPin as an Input
@@ -315,7 +323,7 @@ void setup() {
 // initialize the RTC
   if (!rtc.begin()) {
 
-    Serial.println("RTC not detected");
+    Serial.println(F("RTC not detected"));
 
     while (1); // Hang indefinitely if RTC is not found
 
@@ -323,7 +331,7 @@ void setup() {
 
 //Uncomment the below line to set the initial date and time
 
-//rtc.adjust(DateTime(__DATE__, __TIME__));  
+// rtc.adjust(DateTime(__DATE__, __TIME__));  
 
 // Set the SQW pin to generate a 1Hz signal
   rtc.writeSqwPinMode(DS3231_SquareWave1Hz);
@@ -352,6 +360,27 @@ void setup() {
   Serial.print(":");
   printTwoDigits(alarm.minute());
   Serial.println();
+
+    // Init ESP-NOW
+    if (esp_now_init() != ESP_OK) {
+      Serial.println("Error initializing ESP-NOW");
+      return;
+    }
+  
+    // Once ESPNow is successfully Init, we will register for Send CB to
+    // get the status of Trasnmitted packet
+    esp_now_register_send_cb(OnDataSent);
+    
+    // Register peer
+    memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+    peerInfo.channel = 0;  
+    peerInfo.encrypt = false;
+    
+    // Add peer        
+    if (esp_now_add_peer(&peerInfo) != ESP_OK){
+      Serial.println("Failed to add peer");
+      return;
+    }
  
 
   // Web Server Root URL
@@ -376,19 +405,16 @@ void loop() {
 
   digitalWrite(ledPin, LOW); // Turn off LED for troubleshooting
 
-  if (rtc.now().hour() == 21 && rtc.now().minute() == 1) {
+  if (rtc.now().hour() == 21 && rtc.now().minute() == 3) {
 
     systemStatus = "Sleeping";
     String urlString = statusServer + systemStatus;
     Serial.println(urlString);
     dbInsert(urlString.c_str());
-    Serial.println("Shutting off Bluetooth and Wifi...");
-    WiFi.disconnect();
-    WiFi.mode(WIFI_OFF);
-    Serial.println("Wifi off");
+    Serial.println(F("Going to sleep..."));
     Serial.flush();
-    delay(1000);
-    esp_err_t rtc_gpio_pullup_en(GPIO_NUM_4);
+    delay(5000);
+//    esp_err_t rtc_gpio_pullup_en(GPIO_NUM_4);
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_4, 0);
     esp_deep_sleep_start();
   }
@@ -399,7 +425,6 @@ void loop() {
     rtc.clearAlarm(1); // Clear the alarm flag
   }
 
-  
   if ((millis() - lastTime) > timerDelay) {
     String sensorReadings = getSensorReadings();
     Serial.print(sensorReadings);
