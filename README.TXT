@@ -1,0 +1,1 @@
+This is my water sensor, running on an ESP32 Devkit V1 board. It detects the water level in a vessel, and uploads its information to an in house database using Mysql and an Apache Server. The current level and be viewed by pointing a web browser at the unit IP address. In addition, it sends to current water level to a remote display unit using the ESP NOW protocol.
